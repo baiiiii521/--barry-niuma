@@ -1,4 +1,5 @@
-import { t, setLanguage, getLanguage } from "./i18n";
+import { t, tf, tDays, dayUnit, setLanguage, getLanguage } from "./i18n";
+import { version as APP_VERSION } from "../package.json";
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { getNoiseSynth } from './lib/NoiseSynth';
 import { motion, AnimatePresence } from 'motion/react';
@@ -108,6 +109,10 @@ const TIMEZONES = [
   { label: t('🇦🇺 悉尼'), value: 'Australia/Sydney', short: t('悉尼') },
   { label: t('🇫🇷 巴黎'), value: 'Europe/Paris', short: t('巴黎') },
 ];
+
+const ZODIAC_EN: Record<string, string> = { '鼠': 'Rat', '牛': 'Ox', '虎': 'Tiger', '兔': 'Rabbit', '龙': 'Dragon', '蛇': 'Snake', '马': 'Horse', '羊': 'Goat', '猴': 'Monkey', '鸡': 'Rooster', '狗': 'Dog', '猪': 'Pig' };
+
+const tzShort = (value: string, stored: string) => TIMEZONES.find(z => z.value === value)?.short ?? t(stored);
 
 const getLocalTzInfo = () => {
   try {
@@ -1219,7 +1224,9 @@ export default function App() {
   // Real-time timepieces and lunar
   const otherTime = new Date(now.toLocaleString("en-US", {timeZone: config.otherTimezone}));
   const lunar = Solar.fromDate(localTime).getLunar();
-  const lunarDateStr = `${t('农历')}${lunar.getMonthInChinese()}${t('月')}${lunar.getDayInChinese()} ${lunar.getYearInGanZhi()}${t('年')}`;
+  const lunarDateStr = getLanguage() === 'zh'
+    ? `${t('农历')}${lunar.getMonthInChinese()}${t('月')}${lunar.getDayInChinese()} ${lunar.getYearInGanZhi()}${t('年')}`
+    : tf('农历 {m}/{d} {gz}', { m: Math.abs(lunar.getMonth()), d: lunar.getDay(), gz: ZODIAC_EN[lunar.getYearShengXiao()] ?? lunar.getYearInGanZhi() });
 
   // Work calculation
   const getSecondsFromMidnight = (timeStr: string) => {
@@ -1272,7 +1279,7 @@ export default function App() {
   } else if (isTodayUnpaidLeave) {
      restTypeLabel = t('无薪休假');
   } else if (todayHolidayName) {
-     restTypeLabel = `${todayHolidayName}假期`;
+     restTypeLabel = tf('{name}假期', { name: todayHolidayName });
   }
   
   const isLunchBreak = config.hasLunchBreak && nowSecs >= lunchStartSecs && nowSecs < lunchEndSecs;
@@ -1549,7 +1556,7 @@ export default function App() {
         const isMakeUp = isDateCustomWorkday(tDate, config.holidayRegion);
         isSelectedLeaveDateNaturalRest = (isWknd || isHol) && !isMakeUp;
         if (isSelectedLeaveDateNaturalRest) {
-           selectedLeaveDateLabel = isHolStr ? `${isHolStr}假期，无需请假` : t('周末休息日，无需请假');
+           selectedLeaveDateLabel = isHolStr ? tf('{name}假期，无需请假', { name: isHolStr }) : t('周末休息日，无需请假');
         }
      }
   }
@@ -1688,7 +1695,7 @@ export default function App() {
                      {TIMEZONES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
                    </select>
                    <div className="text-[10px] text-tertiary mb-0.5 flex items-center gap-1 group">
-                     {config.localTimezoneLabel}{t('时间')} <span className="transform rotate-90 text-[8px] opacity-70 group-hover:opacity-100 mix-blend-screen transition-opacity">▸</span>
+                     {tf('{city}时间', { city: tzShort(config.localTimezone, config.localTimezoneLabel) })} <span className="transform rotate-90 text-[8px] opacity-70 group-hover:opacity-100 mix-blend-screen transition-opacity">▸</span>
                    </div>
                    <div className="text-xl font-mono text-brand font-semibold leading-none drop-shadow-[0_0_8px_rgba(0,255,65,0.4)]">{pad0(localTime.getHours())}:{pad0(localTime.getMinutes())}:{pad0(localTime.getSeconds())}</div>
                    <div className="text-[9px] text-primary/40 mt-1 truncate max-w-[80%]">{config.localTimezone.split('/')[1] || config.localTimezone}</div>
@@ -1708,7 +1715,7 @@ export default function App() {
                      {TIMEZONES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
                    </select>
                    <div className="text-[10px] text-tertiary mb-0.5 flex items-center justify-end w-full gap-1 group">
-                     {config.otherTimezoneLabel}{t('时间')} <span className="transform rotate-90 text-[8px] opacity-70 group-hover:opacity-100 mix-blend-screen transition-opacity">▸</span>
+                     {tf('{city}时间', { city: tzShort(config.otherTimezone, config.otherTimezoneLabel) })} <span className="transform rotate-90 text-[8px] opacity-70 group-hover:opacity-100 mix-blend-screen transition-opacity">▸</span>
                    </div>
                    <div className="text-xl font-mono text-primary font-medium leading-none">{pad0(otherTime.getHours())}:{pad0(otherTime.getMinutes())}:{pad0(otherTime.getSeconds())}</div>
                    <div className="text-[9px] text-primary/40 mt-1 truncate max-w-[80%] text-right float-right">{config.otherTimezone.split('/')[1] || config.otherTimezone}</div>
@@ -1812,7 +1819,7 @@ export default function App() {
 
                   <div className="w-full py-2 rounded-xl flex flex-col items-center justify-center font-black uppercase tracking-tighter bg-card border-none">
                     <span className={`text-xs ${isRestDay ? 'text-primary' : nowSecs < startSecs ? 'text-secondary' : nowSecs > endSecs ? 'text-brand' : isLunchBreak ? 'text-orange-500' : 'text-primary'}`}>
-                      {isRestDay ? `${restTypeLabel}愉快 🏖️` : nowSecs < startSecs ? t('等待打工') : nowSecs > endSecs ? t('下班啦 ✨') : isLunchBreak ? t('干饭啦 🍚') : t('正在牛马 ⚡️')}
+                      {isRestDay ? tf('{name}愉快 🏖️', { name: restTypeLabel }) : nowSecs < startSecs ? t('等待打工') : nowSecs > endSecs ? t('下班啦 ✨') : isLunchBreak ? t('干饭啦 🍚') : t('正在牛马 ⚡️')}
                     </span>
                   </div>
                </div>
@@ -1909,7 +1916,7 @@ export default function App() {
                    <ConversionCard icon={<span className="text-xl filter drop-shadow-md">☕️</span>} label={t('咖啡')} value={hide((displayEarned / COFFEE_PRICE).toFixed(1))} unit={t('杯')} color="text-amber-400" />
                    <ConversionCard icon={<span className="text-xl filter drop-shadow-md">⛽️</span>} label={t('汽油')} value={hide((displayEarned / GAS_PRICE).toFixed(1))} unit="L" color="text-red-400" />
                    <ConversionCard icon={<span className="text-xl filter drop-shadow-md">📱</span>} label="iPhone" value={hide(((displayEarned / IPHONE_PRICE) * 100).toFixed(2))} unit="%" color="text-blue-300" />
-                   <ConversionCard icon={<span className="text-xl filter drop-shadow-md">✨</span>} label={config.customItemName} value={hide((displayEarned / config.customItemPrice).toFixed(2))} unit={t('个')} color="text-purple-400" />
+                   <ConversionCard icon={<span className="text-xl filter drop-shadow-md">✨</span>} label={t(config.customItemName)} value={hide((displayEarned / config.customItemPrice).toFixed(2))} unit={t('个')} color="text-purple-400" />
                 </div>
              </div>
           </div>
@@ -1926,7 +1933,7 @@ export default function App() {
                    <CountdownCard 
                       title={t('下班倒计时')}
                       time={`${pad0(Math.floor(offWorkSecs / 3600))}:${pad0(Math.floor((offWorkSecs % 3600)/60))}:${pad0(offWorkSecs % 60)}`}
-                      desc={`${config.endTime}下班`}
+                      desc={tf('{time}下班', { time: config.endTime })}
                       progress={100 - (offWorkSecs / (derivedHoursPerDay * 3600)) * 100}
                       icon={<Briefcase size={16} />}
                       color="green"
@@ -1943,7 +1950,7 @@ export default function App() {
                 )}
                 <CountdownCard 
                    title={isRestDay ? t('距离下个休息日') : t('距离休息日')}
-                   time={`${daysToNextRestDay} 天`}
+                   time={tDays(daysToNextRestDay)}
                    desc={t('盼望好日子')}
                    progress={100 - (daysToNextRestDay / 7) * 100}
                    icon={<CalendarIcon size={16} />}
@@ -1951,8 +1958,8 @@ export default function App() {
                 />
                 <CountdownCard 
                    title={t('距离发薪日')}
-                   time={`${daysToPayday} 天`}
-                   desc={`${config.payday}号发薪`}
+                   time={tDays(daysToPayday)}
+                   desc={tf('{n}号发薪', { n: config.payday })}
                    progress={100 - (daysToPayday / daysInMonth) * 100}
                    icon={<span className="text-sm">💰</span>}
                    color="amber"
@@ -1963,8 +1970,8 @@ export default function App() {
                    return (
                      <CountdownCard 
                         key={evt.id}
-                        title={evt.name}
-                        time={daysToEvt < 0 ? `已过去 ${Math.abs(daysToEvt)} 天` : `${daysToEvt} 天`}
+                        title={t(evt.name)}
+                        time={daysToEvt < 0 ? tf('已过去 {d}', { d: tDays(Math.abs(daysToEvt)) }) : tDays(daysToEvt)}
                         desc={evtDateObj.toLocaleDateString()}
                         progress={daysToEvt < 0 ? 100 : Math.max(0, 100 - (daysToEvt / 365) * 100)}
                         icon={<span className="text-sm">⭐</span>}
@@ -1974,7 +1981,7 @@ export default function App() {
                 })}
                  <CountdownCard 
                    title={t('距离退休')}
-                   time={`${daysToRetire}天`}
+                   time={tDays(daysToRetire, false)}
                    desc={retireDateObj.toLocaleDateString()}
                    progress={daysToRetire < 0 ? 100 : Math.max(0, 100 - (daysToRetire / (365*30)) * 100)}
                    icon={<span className="text-sm">🪑</span>}
@@ -2204,6 +2211,7 @@ export default function App() {
                   <button 
                      onClick={() => {
                         if (!newReimbDesc || !newReimbAmount) return setToast({ message: t('请输入说明和金额'), type: 'warn' });
+                        if (!(Number(newReimbAmount) > 0)) return setToast({ message: t('请输入大于 0 的金额'), type: 'warn' });
                         const newItem = {
                            id: Date.now().toString(),
                            date: new Intl.DateTimeFormat('en-CA', { 
@@ -2497,7 +2505,7 @@ export default function App() {
                  <button 
                    onClick={() => setConfig({
                      ...config, 
-                     customEvents: [...(config.customEvents || []), { id: Math.random().toString(), name: t('新事件'), date: new Date().toISOString().split('T')[0], color: 'purple' }]
+                     customEvents: [...(config.customEvents || []), { id: Math.random().toString(), name: t('新事件'), date: new Intl.DateTimeFormat('en-CA', { timeZone: config.localTimezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date()), color: 'purple' }]
                    })}
                    className="text-xs text-brand border border-brand/30 px-3 py-1 rounded-full hover:bg-brand/10 transition-colors"
                  >{t('添加 +')}</button>
@@ -2615,7 +2623,7 @@ export default function App() {
                  }}
                  className={`w-full py-3 rounded-xl font-semibold text-sm transition-all shadow-lg ${isReminderActive ? 'bg-red-500/10 text-red-500 border border-red-500/20' : 'bg-brand text-[#141414]'}`}
                >
-                 {isReminderActive ? `停止提醒 (剩余 ${Math.floor(reminderTimeLeft / 60)} 分钟)` : t('开启提醒')}
+                 {isReminderActive ? tf('停止提醒 (剩余 {n} 分钟)', { n: Math.floor(reminderTimeLeft / 60) }) : t('开启提醒')}
                </button>
            </div>
 
@@ -2754,7 +2762,7 @@ export default function App() {
               <p>Architect & Author</p>
               <p className="font-semibold text-primary">Barry</p>
               <a href="mailto:barry.bai@hotwavehk.com" className="hover:text-brand transition-colors">barry.bai@hotwavehk.com</a>
-              <p className="mt-2 text-[10px] tracking-widest uppercase">Version 1.0.23</p>
+              <p className="mt-2 text-[10px] tracking-widest uppercase">Version {APP_VERSION}</p>
            </div>
         </div>
       )}
@@ -2959,7 +2967,7 @@ export default function App() {
               <div className="text-center">
                  <div className="text-lg font-bold text-primary">{calendarDate.getFullYear()}{t('年')}{calendarDate.getMonth() + 1}{t('月')}</div>
                   <div className="text-[10px] text-tertiary">
-                    {t('工作日:')} <span className="font-bold text-primary">{calWorkDays}</span>{t('天 | 休息日:')} <span className="font-bold text-primary">{calRestDays}</span>{t('天')}
+                    {t('工作日:')} <span className="font-bold text-primary">{calWorkDays}</span>{dayUnit(calWorkDays)} | {t('休息日:')} <span className="font-bold text-primary">{calRestDays}</span>{dayUnit(calRestDays)}
                   </div>
               </div>
               <button 
@@ -3036,7 +3044,7 @@ export default function App() {
                  {t('提示：点击日期记录备忘事项，所有数据均保留在您本地。')}
                                       </div>
               <div className="text-center pt-8 pb-4 opacity-30">
-                 <p className="text-[10px] font-mono tracking-widest text-tertiary uppercase">Version 1.0.23</p>
+                 <p className="text-[10px] font-mono tracking-widest text-tertiary uppercase">Version {APP_VERSION}</p>
               </div>
             </div>
          </div>
@@ -3091,14 +3099,14 @@ export default function App() {
                          <CountdownCard 
                             title={t('下班倒计时')}
                             time={`${pad0(Math.floor(offWorkSecs / 3600))}:${pad0(Math.floor((offWorkSecs % 3600)/60))}:${pad0(offWorkSecs % 60)}`}
-                            desc={`${config.endTime}下班`}
+                            desc={tf('{time}下班', { time: config.endTime })}
                             progress={100 - (offWorkSecs / (derivedHoursPerDay * 3600)) * 100}
                             icon={<Briefcase size={16} />}
                             color="green"
                          />
                          <CountdownCard 
                             title={isRestDay ? t('距离下个休息日') : t('距离休息日')}
-                            time={`${daysToNextRestDay} 天`}
+                            time={tDays(daysToNextRestDay)}
                             desc={t('盼望好日子')}
                             progress={100 - (daysToNextRestDay / 7) * 100}
                             icon={<CalendarIcon size={16} />}
@@ -3106,15 +3114,15 @@ export default function App() {
                          />
                          <CountdownCard 
                             title={t('距离发薪日')}
-                            time={`${daysToPayday} 天`}
-                            desc={`${config.payday}号发薪`}
+                            time={tDays(daysToPayday)}
+                            desc={tf('{n}号发薪', { n: config.payday })}
                             progress={100 - (daysToPayday / daysInMonth) * 100}
                             icon={<span className="text-sm">💰</span>}
                             color="amber"
                          />
                          <CountdownCard 
                             title={t('距离退休')}
-                            time={`${daysToRetire}天`}
+                            time={tDays(daysToRetire, false)}
                             desc={retireDateObj.toLocaleDateString()}
                             progress={daysToRetire < 0 ? 100 : Math.max(0, 100 - (daysToRetire / (365*30)) * 100)}
                             icon={<span className="text-sm">🪑</span>}
@@ -3126,8 +3134,8 @@ export default function App() {
                             return (
                               <CountdownCard 
                                  key={evt.id}
-                                 title={evt.name}
-                                 time={daysToEvt < 0 ? `已过去 ${Math.abs(daysToEvt)} 天` : `${daysToEvt} 天`}
+                                 title={t(evt.name)}
+                                 time={daysToEvt < 0 ? tf('已过去 {d}', { d: tDays(Math.abs(daysToEvt)) }) : tDays(daysToEvt)}
                                  desc={evtDateObj.toLocaleDateString()}
                                  progress={daysToEvt < 0 ? 100 : Math.max(0, 100 - (daysToEvt / 365) * 100)}
                                  icon={<span className="text-sm">⭐</span>}
@@ -3309,7 +3317,7 @@ const colorMap = {
   red: { bg: 'bg-red-500/10', text: 'text-red-500', border: 'border-red-500/20', bar: 'bg-red-500' },
 };
 
-function CountdownCard({ title, time, desc, progress, icon, color }: { title: string, time: string, desc: string, progress: number, icon: React.ReactNode, color: keyof typeof colorMap }) {
+function CountdownCard({ title, time, desc, progress, icon, color }: { key?: React.Key, title: string, time: string, desc: string, progress: number, icon: React.ReactNode, color: keyof typeof colorMap }) {
   const styles = colorMap[color];
   const w = Math.max(0, Math.min(100, progress));
   

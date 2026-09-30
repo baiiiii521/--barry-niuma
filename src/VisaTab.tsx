@@ -1,4 +1,4 @@
-import { t } from "./i18n";
+import { t, toKey } from "./i18n";
 import React, { useState, useEffect, useMemo } from 'react';
 import { Plane, Star, Trash2, Calendar as CalendarIcon, MapPin, ChevronRight, ArrowLeft } from 'lucide-react';
 
@@ -17,23 +17,36 @@ type TravelRecord = {
   port: string;
 };
 
-const COUNTRIES = [t('越南'), t('泰国'), t('其他')];
+// Stored values are the Chinese keys below (language-independent); always display them via t().
+const COUNTRIES = ['越南', '泰国', '其他'];
 const VIETNAM_PORTS = [
-  t('友谊关'), t('东兴'), t('老街口岸'), t('胡志明市机场'), t('河内机场'),
-  t('岘港机场'), t('芽庄机场'), t('富国岛机场'), t('芒街口岸'), t('高平口岸'),
-  t('谅山口岸'), t('同登口岸'), t('其他')
+  '友谊关', '东兴', '老街口岸', '胡志明市机场', '河内机场',
+  '岘港机场', '芽庄机场', '富国岛机场', '芒街口岸', '高平口岸',
+  '谅山口岸', '同登口岸', '其他'
 ];
 const THAILAND_PORTS = [
-  t('曼谷素万那普机场 (BKK)'), t('曼谷廊曼机场 (DMK)'), t('普吉岛机场 (HKT)'), t('清迈机场 (CNX)'), t('其他')
+  '曼谷素万那普机场 (BKK)', '曼谷廊曼机场 (DMK)', '普吉岛机场 (HKT)', '清迈机场 (CNX)', '其他'
 ];
+const ALL_PORTS = [...VIETNAM_PORTS, ...THAILAND_PORTS, '未知口岸'];
 
 const VISA_TYPES = [
-  t('旅游签 (Tourist)'),
-  t('商务签 (Business)'),
-  t('工作签 (Work)'),
-  t('学生签 (Student)'),
-  t('探亲签 (Family)')
+  '旅游签 (Tourist)',
+  '商务签 (Business)',
+  '工作签 (Work)',
+  '学生签 (Student)',
+  '探亲签 (Family)'
 ];
+
+// Older versions saved these fields in whatever language was active; map them back to the keys.
+const normVisa = (v: VisaData): VisaData => ({ ...v, type: toKey(v.type, VISA_TYPES), country: toKey(v.country, COUNTRIES) });
+const normRecord = (r: TravelRecord): TravelRecord => ({ ...r, port: toKey(r.port, ALL_PORTS) });
+
+// 'YYYY-MM-DD' -> local midnight (new Date('YYYY-MM-DD') would be UTC and shift the day)
+const parseLocal = (d: string) => {
+  const [y, m, day] = d.split('-').map(Number);
+  return new Date(y, (m || 1) - 1, day || 1);
+};
+const dayDiff = (a: Date, b: Date) => Math.round((b.getTime() - a.getTime()) / 86400000);
 
 const pad0 = (n: number) => n.toString().padStart(2, '0');
 
@@ -44,14 +57,14 @@ export function VisaTab() {
   const [visas, setVisas] = useState<VisaData[]>(() => {
     try {
       const saved = localStorage.getItem('my_visas');
-      return saved ? JSON.parse(saved) : [];
+      return saved ? (JSON.parse(saved) as VisaData[]).map(normVisa) : [];
     } catch (e) { return []; }
   });
 
   const [records, setRecords] = useState<TravelRecord[]>(() => {
     try {
       const saved = localStorage.getItem('my_travel_records');
-      return saved ? JSON.parse(saved) : [];
+      return saved ? (JSON.parse(saved) as TravelRecord[]).map(normRecord) : [];
     } catch (e) { return []; }
   });
 
@@ -68,11 +81,15 @@ export function VisaTab() {
 
   // --- Calculations ---
   const activeVisa = visas[0]; // For simplicity, we manage the first visa or allow editing the first
+  const isExpired = useMemo(() => {
+    if (!activeVisa || !activeVisa.expiryDate) return false;
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    return parseLocal(activeVisa.expiryDate).getTime() < today.getTime();
+  }, [activeVisa]);
   const remainingDays = useMemo(() => {
     if (!activeVisa || !activeVisa.expiryDate) return 0;
-    const exp = new Date(activeVisa.expiryDate).getTime();
-    const now = Date.now();
-    return Math.max(0, Math.ceil((exp - now) / (1000 * 3600 * 24)));
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    return Math.max(0, dayDiff(today, parseLocal(activeVisa.expiryDate)));
   }, [activeVisa]);
 
   const statusColor = useMemo(() => {
@@ -84,42 +101,40 @@ export function VisaTab() {
   }, [remainingDays, activeVisa]);
 
   const { currentStay, yearTotal } = useMemo(() => {
-    // Sort records descending by date
-    const sorted = [...records].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-    
-    // year total
-    const currentYear = new Date().getFullYear();
-    let yTotal = 0;
-    
-    let lastEntry: Date | null = null;
-    let currStay = 0;
-    
-    // Sort ascending for duration calculation
-    const ascRecords = [...records].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-    
-    let activeEntryDate: Date | null = null;
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const yearStart = new Date(today.getFullYear(), 0, 1);
+    const yearEnd = new Date(today.getFullYear(), 11, 31);
 
-    for (let r of ascRecords) {
+    // Days of a stay (both ends inclusive) that fall inside the current calendar year
+    const daysInThisYear = (start: Date, end: Date) => {
+      const from = start.getTime() > yearStart.getTime() ? start : yearStart;
+      const to = end.getTime() < yearEnd.getTime() ? end : yearEnd;
+      return Math.max(0, dayDiff(from, to) + 1);
+    };
+
+    // Ascending by date; on the same day an entry comes before an exit (same-day trips)
+    const asc = [...records].sort((a, b) =>
+      parseLocal(a.date).getTime() - parseLocal(b.date).getTime() ||
+      (a.type === b.type ? 0 : a.type === 'entry' ? -1 : 1)
+    );
+
+    let yTotal = 0;
+    let currStay = 0;
+    let activeEntry: Date | null = null;
+
+    for (const r of asc) {
       if (r.type === 'entry') {
-        activeEntryDate = new Date(r.date);
-      } else if (r.type === 'exit' && activeEntryDate) {
-        const exitDate = new Date(r.date);
-        const days = Math.floor((exitDate.getTime() - activeEntryDate.getTime()) / (1000 * 3600 * 24)) + 1;
-        
-        if (exitDate.getFullYear() === currentYear || activeEntryDate.getFullYear() === currentYear) {
-           yTotal += days; // simplified
-        }
-        activeEntryDate = null;
+        activeEntry = parseLocal(r.date);
+      } else if (activeEntry) {
+        yTotal += daysInThisYear(activeEntry, parseLocal(r.date));
+        activeEntry = null;
       }
     }
-    
-    if (activeEntryDate) {
+
+    if (activeEntry) {
       // currently staying
-      const now = new Date();
-      currStay = Math.floor((now.getTime() - activeEntryDate.getTime()) / (1000 * 3600 * 24)) + 1;
-      if (activeEntryDate.getFullYear() === currentYear || now.getFullYear() === currentYear) {
-         yTotal += currStay;
-      }
+      currStay = Math.max(0, dayDiff(activeEntry, today) + 1);
+      yTotal += daysInThisYear(activeEntry, today);
     }
 
     return { currentStay: currStay, yearTotal: yTotal };
@@ -128,10 +143,19 @@ export function VisaTab() {
 
   // --- Sub-View: Edit Visa ---
   const [editingVisa, setEditingVisa] = useState<Partial<VisaData>>({});
+  // "其他" country: the typed name lives in its own state so the input stays mounted while typing
+  const [countryIsOther, setCountryIsOther] = useState(false);
+  const [customCountry, setCustomCountry] = useState('');
   const openEditVisa = () => {
     if (visas.length > 0) {
       setEditingVisa(visas[0]);
+      const c = visas[0].country;
+      const other = !!c && c !== COUNTRIES[0] && c !== COUNTRIES[1];
+      setCountryIsOther(other);
+      setCustomCountry(other && c !== '其他' ? c : '');
     } else {
+      setCountryIsOther(false);
+      setCustomCountry('');
       setEditingVisa({ type: VISA_TYPES[0], country: COUNTRIES[0], effectiveDate: '', expiryDate: '' });
     }
     setView('edit-visa');
@@ -140,6 +164,9 @@ export function VisaTab() {
   const saveVisa = () => {
     if (!editingVisa.type || !editingVisa.country || !editingVisa.effectiveDate || !editingVisa.expiryDate) {
       setToast(t('请填写完整信息')); return;
+    }
+    if (parseLocal(editingVisa.expiryDate).getTime() < parseLocal(editingVisa.effectiveDate).getTime()) {
+      setToast(t('到期日期不能早于生效日期')); return;
     }
     const newVisa = { id: editingVisa.id || Date.now().toString(), ...editingVisa } as VisaData;
     setVisas([newVisa]);
@@ -154,23 +181,26 @@ export function VisaTab() {
   // --- Sub-View: Edit Records ---
   const [newRecType, setNewRecType] = useState<'entry'|'exit'>('entry');
   const [newRecDate, setNewRecDate] = useState('');
-  const [newRecPortDropdown, setNewRecPortDropdown] = useState(t('其他'));
+  const [newRecPortDropdown, setNewRecPortDropdown] = useState('其他');
   const [newRecPortCustom, setNewRecPortCustom] = useState('');
 
   const activeCountryContext = activeVisa?.country || '';
-  const portOptions = activeCountryContext === t('越南') ? VIETNAM_PORTS : activeCountryContext === t('泰国') ? THAILAND_PORTS : [t('其他')];
+  const portOptions = useMemo(
+    () => activeCountryContext === '越南' ? VIETNAM_PORTS : activeCountryContext === '泰国' ? THAILAND_PORTS : ['其他'],
+    [activeCountryContext]
+  );
   
   useEffect(() => {
      if (portOptions.length > 1) {
         setNewRecPortDropdown(portOptions[0]);
      } else {
-        setNewRecPortDropdown(t('其他'));
+        setNewRecPortDropdown('其他');
      }
   }, [activeCountryContext, portOptions]);
 
   const saveRecord = () => {
     if (!newRecDate) { setToast(t('请选择日期')); return; }
-    const port = newRecPortDropdown === t('其他') ? (newRecPortCustom || t('未知口岸')) : newRecPortDropdown;
+    const port = newRecPortDropdown === '其他' ? (newRecPortCustom.trim() || '未知口岸') : newRecPortDropdown;
     const rec: TravelRecord = {
       id: Date.now().toString(),
       type: newRecType,
@@ -182,9 +212,14 @@ export function VisaTab() {
     setNewRecPortCustom('');
   };
 
+  const toastEl = toast && (
+    <div className="fixed top-6 left-1/2 -translate-x-1/2 z-50 bg-black/80 text-white text-xs font-bold px-4 py-2 rounded-full shadow-lg">{toast}</div>
+  );
+
   if (view === 'edit-visa') {
     return (
       <div className="flex-1 w-full absolute inset-0 z-40 flex flex-col pt-12 pb-24 overflow-y-auto md:rounded-3xl md:max-w-4xl mx-auto" style={{background: 'linear-gradient(180deg, #0288D1 0%, #03A9F4 20%, #F5F7FA 20%, #F5F7FA 100%)'}}>
+        {toastEl}
         <div className="px-4 flex items-center justify-between mb-6">
           <button onClick={() => setView('main')} className="text-white p-2 shrink-0">
             <ArrowLeft size={24} />
@@ -203,17 +238,30 @@ export function VisaTab() {
                 <label className="text-[11px] text-gray-400 font-bold mb-1">{t('国家')}</label>
                 <select 
                   className="font-bold text-lg text-gray-800 bg-transparent border-none p-0 focus:ring-0 outline-none w-full"
-                  value={editingVisa.country || COUNTRIES[0]}
-                  onChange={e => setEditingVisa({...editingVisa, country: e.target.value})}
+                  value={countryIsOther ? '其他' : (editingVisa.country || COUNTRIES[0])}
+                  onChange={e => {
+                    const v = e.target.value;
+                    if (v === '其他') {
+                      setCountryIsOther(true);
+                      setEditingVisa({...editingVisa, country: customCountry.trim() || '其他'});
+                    } else {
+                      setCountryIsOther(false);
+                      setEditingVisa({...editingVisa, country: v});
+                    }
+                  }}
                 >
-                  {COUNTRIES.map(c => <option key={c} value={c}>{c}</option>)}
+                  {COUNTRIES.map(c => <option key={c} value={c}>{t(c)}</option>)}
                 </select>
-                {editingVisa.country === t('其他') && (
+                {countryIsOther && (
                   <input 
                     type="text" 
                     placeholder={t('输入国家名称')}
                     className="font-bold text-base text-gray-800 bg-transparent border-b border-[#0288D1] p-1 mt-2 focus:ring-0 outline-none w-full"
-                    onChange={e => setEditingVisa({...editingVisa, country: e.target.value})}
+                    value={customCountry}
+                    onChange={e => {
+                      setCustomCountry(e.target.value);
+                      setEditingVisa({...editingVisa, country: e.target.value.trim() || '其他'});
+                    }}
                   />
                 )}
               </div>
@@ -230,7 +278,7 @@ export function VisaTab() {
                   value={editingVisa.type || ''}
                   onChange={e => setEditingVisa({...editingVisa, type: e.target.value})}
                 >
-                  {VISA_TYPES.map(vt => <option key={vt} value={vt}>{vt}</option>)}
+                  {VISA_TYPES.map(vt => <option key={vt} value={vt}>{t(vt)}</option>)}
                 </select>
               </div>
             </div>
@@ -313,6 +361,7 @@ export function VisaTab() {
   if (view === 'edit-records') {
     return (
       <div className="flex-1 w-full absolute inset-0 z-40 flex flex-col pt-12 pb-24 overflow-y-auto md:rounded-3xl md:max-w-4xl mx-auto" style={{background: 'linear-gradient(180deg, #0288D1 0%, #03A9F4 15%, #F5F7FA 15%, #F5F7FA 100%)'}}>
+        {toastEl}
         <div className="px-4 flex items-center justify-between mb-6 text-white pt-2">
           <button onClick={() => setView('main')} className="p-2 shrink-0">
             <ArrowLeft size={24} />
@@ -356,10 +405,10 @@ export function VisaTab() {
                         onChange={e => setNewRecPortDropdown(e.target.value)} 
                         className="w-full bg-transparent border-none text-base font-bold text-[#0288D1] focus:ring-0 outline-none p-0 h-[40px]"
                      >
-                        {portOptions.map(p => <option key={p} value={p}>{p}</option>)}
+                        {portOptions.map(p => <option key={p} value={p}>{t(p)}</option>)}
                      </select>
                   </div>
-                  {newRecPortDropdown === t('其他') && (
+                  {newRecPortDropdown === '其他' && (
                      <div className="flex items-center mt-1 pb-1 pl-8">
                        <input 
                           type="text" 
@@ -391,11 +440,11 @@ export function VisaTab() {
                        </div>
                        <div className="flex flex-col">
                           <span className="font-bold text-gray-800 text-lg tracking-tight mb-0.5">{rec.date}</span>
-                          <span className="text-gray-400 text-xs font-bold">{rec.port}</span>
+                          <span className="text-gray-400 text-xs font-bold">{t(rec.port)}</span>
                        </div>
                     </div>
                     <button 
-                      onClick={() => setRecords(records.filter(r => r.id !== rec.id))}
+                      onClick={() => { if (window.confirm(t('确定删除这条出入境记录吗？'))) setRecords(records.filter(r => r.id !== rec.id)); }}
                       className="w-10 h-10 flex items-center justify-center text-gray-300 hover:text-red-400 transition-colors"
                     >
                       <Trash2 size={18} />
@@ -415,6 +464,7 @@ export function VisaTab() {
   // --- Main View ---
   return (
     <div className="flex-1 w-full absolute inset-0 z-40 flex flex-col pt-12 md:rounded-3xl md:max-w-4xl mx-auto" style={{background: 'linear-gradient(180deg, #0288D1 0%, #03A9F4 25%, #F5F7FA 25%, #F5F7FA 100%)'}}>
+        {toastEl}
        <div className="px-6 flex justify-between items-start mb-8 text-white pt-2">
           <div className="flex flex-col">
              <h1 className="text-[28px] font-bold tracking-tight mb-1">{t('出国管家')}</h1>
@@ -438,16 +488,22 @@ export function VisaTab() {
                 <div className="flex flex-col">
                    <span className="text-gray-400 font-bold text-xs mb-1">{t('签证状态')}</span>
                    <span className="font-bold text-gray-800 text-lg tracking-tight">
-                     {activeVisa ? activeVisa.type : t('未设置签证')}
+                     {activeVisa ? t(activeVisa.type) : t('未设置签证')}
                    </span>
                 </div>
              </div>
              <div className="flex items-center gap-2">
                 <div className="flex flex-col items-end">
-                   <span className="text-[32px] font-bold leading-none tracking-tighter shadow-sm" style={{color: statusColor}}>
-                       {activeVisa ? remainingDays : '-'}
-                   </span>
-                   <span className="text-[10px] text-gray-400 font-bold mt-1">{t('天剩余')}</span>
+                   {isExpired ? (
+                     <span className="text-[24px] font-bold leading-none tracking-tighter" style={{color: statusColor}}>{t('已过期')}</span>
+                   ) : (
+                     <>
+                       <span className="text-[32px] font-bold leading-none tracking-tighter shadow-sm" style={{color: statusColor}}>
+                           {activeVisa ? remainingDays : '-'}
+                       </span>
+                       <span className="text-[10px] text-gray-400 font-bold mt-1">{t('天剩余')}</span>
+                     </>
+                   )}
                 </div>
                 <ChevronRight size={18} className="text-gray-300" />
              </div>
