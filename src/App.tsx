@@ -95,7 +95,56 @@ const formatMoney = (amount: number) => {
   return amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 };
 
+// Full precision for normal amounts; switches to compact form (10.64亿 / 1.06B) once the
+// number gets too long to fit a card, e.g. salaries shown in VND.
+const formatMoneyFit = (amount: number, maxChars = 11) => {
+  const full = formatMoney(amount);
+  if (full.length <= maxChars) return full;
+  return new Intl.NumberFormat(getLanguage() === 'zh' ? 'zh-CN' : 'en-US', { notation: 'compact', maximumFractionDigits: 2 }).format(amount);
+};
+
 const pad0 = (num: number) => num.toString().padStart(2, '0');
+
+// --- DISPLAY CURRENCIES ---
+// rate = how many CNY one unit of this currency is worth (1 USD = 6.8 CNY → rate 6.8)
+type DisplayCurrency = { code: string; symbol: string; rate: number };
+const BASE_CURRENCY: DisplayCurrency = { code: 'CNY', symbol: '¥', rate: 1 };
+const DEFAULT_CURRENCIES: DisplayCurrency[] = [
+  { code: 'USD', symbol: '$', rate: 6.8 },
+  { code: 'HKD', symbol: 'HK$', rate: 0.91 },
+  { code: 'THB', symbol: '฿', rate: 0.2 },
+  { code: 'VND', symbol: '₫', rate: 0.00028 },
+];
+
+// Shrinks the font of a single-line value until it fits its container's width.
+function AutoFitText({ children, maxPx, minPx = 14, className = '', center = false }: { children: React.ReactNode, maxPx: number, minPx?: number, className?: string, center?: boolean }) {
+  const boxRef = useRef<HTMLDivElement>(null);
+  const textRef = useRef<HTMLSpanElement>(null);
+  const [size, setSize] = useState(maxPx);
+  const fit = useCallback(() => {
+    const box = boxRef.current, text = textRef.current;
+    if (!box || !text) return;
+    const avail = box.clientWidth;
+    // measure at max size so the result doesn't depend on the previous size
+    text.style.fontSize = `${maxPx}px`;
+    const needed = text.scrollWidth;
+    const next = needed > avail && needed > 0 ? Math.max(minPx, Math.floor(maxPx * avail / needed)) : maxPx;
+    text.style.fontSize = `${next}px`;
+    setSize(next);
+  }, [maxPx, minPx]);
+  React.useLayoutEffect(fit, [children, fit]);
+  useEffect(() => {
+    if (!boxRef.current || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => fit());
+    ro.observe(boxRef.current);
+    return () => ro.disconnect();
+  }, [fit]);
+  return (
+    <div ref={boxRef} className={`w-full min-w-0 overflow-hidden ${center ? 'text-center' : ''}`}>
+      <span ref={textRef} className={`inline-block whitespace-nowrap ${className}`} style={{ fontSize: `${size}px` }}>{children}</span>
+    </div>
+  );
+}
 
 // Timezones options
 const TIMEZONES = [
@@ -867,12 +916,18 @@ export default function App() {
       pomodoroEndSound: 'bell',
       pomodoroBreakSound: 'chime',
       avatarTheme: 'default',
+      displayCurrency: 'CNY',
+      currencies: DEFAULT_CURRENCIES,
     };
     try {
       const savedConfig = localStorage.getItem('niuma_config');
       if (savedConfig) {
         const parsed = JSON.parse(savedConfig);
         const merged = { ...defaultConfig, ...(parsed || {}) };
+        if (!Array.isArray(parsed?.currencies)) {
+          // migrate the old single USD rate into the currency list
+          merged.currencies = DEFAULT_CURRENCIES.map(c => c.code === 'USD' && parsed?.exchangeRateUsd ? { ...c, rate: parsed.exchangeRateUsd } : c);
+        }
         if (!merged.customEvents && merged.customEventName) {
           merged.customEvents = [{ id: Math.random().toString(), name: merged.customEventName, date: merged.customEventDate || '2000-01-01', color: 'purple' }];
         }
@@ -885,6 +940,22 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('niuma_config', JSON.stringify(config));
   }, [config]);
+
+  // New users start on sample data. The flag is set on the very first visit (before
+  // niuma_config is written) and cleared once they confirm their own numbers.
+  const [isDemoData, setIsDemoData] = useState(() => {
+    try {
+      if (localStorage.getItem('niuma_demo') === '1') return true;
+      if (!localStorage.getItem('niuma_config')) { localStorage.setItem('niuma_demo', '1'); return true; }
+    } catch (e) {}
+    return false;
+  });
+  const [showOnboarding, setShowOnboarding] = useState(isDemoData);
+  const finishOnboarding = () => {
+    setIsDemoData(false);
+    setShowOnboarding(false);
+    try { localStorage.removeItem('niuma_demo'); } catch (e) {}
+  };
 
 
 
@@ -1118,7 +1189,7 @@ export default function App() {
   }, []);
   const [isOvertime, setIsOvertime] = useState(() => isSameDay ? (runtimeState?.isOvertime ?? false) : false);
   const [showMoney, setShowMoney] = useState(true);
-  const [showUSD, setShowUSD] = useState(false);
+  const [showCurrencyEditor, setShowCurrencyEditor] = useState(false);
   const [excuse, setExcuse] = useState(t('刚刚我的键盘卡主了，我在测试硬件抗冲击力...'));
   
   const generateExcuse = () => {
@@ -1405,8 +1476,29 @@ export default function App() {
   const earnedToday = workSecondsToday * secondRate;
   const slackLoss = slackSecondsToday * secondRate;
   const overtimeLoss = overtimeSecondsToday * secondRate;
-  const sym = showUSD ? '$' : '¥';
-  const ex = showUSD ? config.exchangeRateUsd : 1;
+  const currencyList: DisplayCurrency[] = Array.isArray(config.currencies) ? config.currencies : DEFAULT_CURRENCIES;
+  const activeCurrency: DisplayCurrency = currencyList.find(c => c.code === config.displayCurrency && c.rate > 0) || BASE_CURRENCY;
+  // the "dual currency" card shows the selected currency, or the first foreign one when CNY is selected
+  const secondaryCurrency: DisplayCurrency = activeCurrency.code !== 'CNY' ? activeCurrency : (currencyList.find(c => c.rate > 0) || DEFAULT_CURRENCIES[0]);
+  const sym = activeCurrency.symbol;
+  const ex = activeCurrency.rate;
+  const setDisplayCurrency = (code: string) => setConfig((c: any) => ({ ...c, displayCurrency: code }));
+  const cycleCurrency = () => {
+    const codes = ['CNY', ...currencyList.filter(c => c.rate > 0).map(c => c.code)];
+    setDisplayCurrency(codes[(codes.indexOf(activeCurrency.code) + 1) % codes.length]);
+  };
+  const renderCurrencySelect = (textCls = 'text-[9px]') => (
+    <select
+      aria-label={t('显示币种')}
+      value={activeCurrency.code}
+      onChange={e => e.target.value === '__edit' ? setShowCurrencyEditor(true) : setDisplayCurrency(e.target.value)}
+      className={`${textCls} max-w-[76px] min-w-0 px-1 py-0.5 rounded border bg-transparent outline-none cursor-pointer transition-colors ${activeCurrency.code !== 'CNY' ? 'border-brand text-brand' : 'border-app-strong text-secondary hover:text-primary'}`}
+    >
+      <option value="CNY">CNY ¥</option>
+      {currencyList.filter(c => c.rate > 0).map(c => <option key={c.code} value={c.code}>{c.code} {c.symbol}</option>)}
+      <option value="__edit">{t('⚙️ 自定义汇率…')}</option>
+    </select>
+  );
   const hide = (val: string) => showMoney ? val : '****';
   
   // Leave calculations
@@ -1622,6 +1714,21 @@ export default function App() {
               </div>
             </div>
 
+            {/* New-user hint: everything below is sample data until they fill in their own */}
+            {isDemoData && (
+              <button
+                onClick={() => setActiveTab('profile')}
+                className="w-full text-left bg-orange-500/10 border border-orange-500/30 rounded-2xl px-4 py-3 flex items-center gap-3 hover:bg-orange-500/15 transition-colors"
+              >
+                <span className="text-xl leading-none">👀</span>
+                <span className="flex-1 min-w-0">
+                  <span className="block text-xs font-bold text-orange-500">{t('当前展示的是示例数据')}</span>
+                  <span className="block text-[11px] text-secondary truncate">{t('填写你的月薪和作息，算出你自己的每秒收入')}</span>
+                </span>
+                <span className="shrink-0 text-[11px] font-bold text-app bg-orange-500 rounded-full px-3 py-1">{t('去填写')}</span>
+              </button>
+            )}
+
             {/* Daily Work Progress */}
             <div className="bg-card rounded-[24px] p-5 border border-app shadow-2xl relative overflow-hidden mb-2 group">
               <div className="absolute top-0 right-0 w-32 h-32 bg-brand/5 blur-3xl rounded-full pointer-events-none group-hover:bg-brand/10 transition-colors duration-500"></div>
@@ -1825,38 +1932,40 @@ export default function App() {
                </div>
 
                {/* Right: Income Main Metrics */}
-               <div className="flex-1 rounded-[32px] bg-gradient-to-b from-card to-card-inner border-[1.5px] border-app p-5 flex flex-col shadow-2xl justify-between relative overflow-hidden">
+               <div className="flex-1 min-w-0 rounded-[32px] bg-gradient-to-b from-card to-card-inner border-[1.5px] border-app p-5 flex flex-col shadow-2xl justify-between relative overflow-hidden">
                   <div className="absolute top-0 right-0 w-32 h-32 bg-brand/5 blur-3xl rounded-full pointer-events-none" />
 
                   <div>
-                    <div className="flex items-center justify-between text-xs text-secondary mb-2">
-                       <span>{t('今日已赚')}</span>
-                       <div className="flex items-center gap-1.5">
-                          <button onClick={() => setShowUSD(!showUSD)} className={`text-[9px] px-1.5 py-0.5 rounded border transition-colors ${showUSD ? 'border-brand text-brand' : 'border-app-strong text-secondary hover:text-primary'}`}>USD</button>
+                    <div className="flex items-center justify-between gap-1 text-xs text-secondary mb-2">
+                       <span className="whitespace-nowrap shrink-0">{t('今日已赚')}</span>
+                       <div className="flex items-center gap-1.5 min-w-0">
+                          {renderCurrencySelect('text-[9px]')}
                           <button onClick={() => setShowMoney(!showMoney)} className="text-tertiary hover:text-primary">
                              {showMoney ? <Eye size={14} /> : <EyeOff size={14} />}
                           </button>
                        </div>
                     </div>
                     
-                    <div className="flex items-baseline gap-1">
-                       <span className="text-brand text-xl font-mono opacity-80">{sym}</span>
-                       <motion.span 
+                    <div className="flex items-baseline gap-1 min-w-0">
+                       <span className="text-brand text-xl font-mono opacity-80 shrink-0">{sym}</span>
+                       <motion.div
                          key={earnedToday}
                          initial={{ opacity: 0.8, y: 2 }}
                          animate={{ opacity: 1, y: 0 }}
-                         className="text-4xl md:text-5xl font-mono font-bold text-brand tracking-tighter leading-none"
+                         className="flex-1 min-w-0"
                        >
-                         {hide(formatMoney(earnedToday / ex))}
-                       </motion.span>
+                         <AutoFitText maxPx={44} minPx={12} className="font-mono font-bold text-brand tracking-tighter leading-none">
+                           {hide(formatMoneyFit(earnedToday / ex, 12))}
+                         </AutoFitText>
+                       </motion.div>
                     </div>
                   </div>
 
                   <div className="flex flex-col gap-2 mt-4">
                      <div className="bg-card-inner rounded-xl p-2.5 flex items-center justify-between border border-app">
-                        <div className="flex flex-col">
+                        <div className="flex flex-col min-w-0">
                            <span className="text-[9px] text-tertiary mb-0.5">{t('本月已赚（预估）')}</span>
-                           <span className="text-primary font-mono text-xs">{sym} {hide(formatMoney(earnedThisMonth / ex))}</span>
+                           <span className="text-primary font-mono text-xs truncate">{sym} {hide(formatMoneyFit(earnedThisMonth / ex, 10))}</span>
                         </div>
                         <div className="w-8 h-8 rounded-full bg-brand/10 flex items-center justify-center text-brand">💰</div>
                      </div>
@@ -1874,7 +1983,7 @@ export default function App() {
              {/* Bottom row: Accumulated */}
              <div className="bg-card rounded-2xl p-3 border border-app flex items-center justify-between shadow-lg px-4">
                 <span className="text-[11px] text-secondary">{t('历史累计已赚 (估算)')}</span>
-                <span className="text-primary font-mono text-sm tracking-tight">{sym} {hide(formatMoney((totalEarnedBeforeToday + earnedThisMonth) / ex))}</span>
+                <span className="text-primary font-mono text-sm tracking-tight truncate min-w-0 ml-2">{sym} {hide(formatMoneyFit((totalEarnedBeforeToday + earnedThisMonth) / ex, 14))}</span>
              </div>
           </div>
 
@@ -1895,7 +2004,7 @@ export default function App() {
                       </select>
                       <div className="flex gap-2">
                          <div className="text-[10px] bg-primary/5 text-primary/80 px-2 py-1 flex items-center rounded-full hover:bg-primary/10 border border-app transition-colors cursor-pointer" onClick={generateShareImage}>{t('📸 分享')}</div>
-                         <div className="text-[10px] bg-brand/10 text-brand px-2 py-1 flex items-center rounded-full gap-1 border border-brand/20 shadow-sm cursor-pointer" onClick={() => setShowUSD(!showUSD)}>{t('双币展示')}</div>
+                         <div className="text-[10px] bg-brand/10 text-brand px-2 py-1 flex items-center rounded-full gap-1 border border-brand/20 shadow-sm cursor-pointer" onClick={cycleCurrency}>{t('双币展示')}</div>
                       </div>
                    </div>
                 </div>
@@ -1903,11 +2012,11 @@ export default function App() {
                 <div className="grid grid-cols-2 gap-2 mb-3">
                    <div className="bg-card-inner rounded-xl p-3 border border-app flex flex-col items-center justify-center relative overflow-hidden">
                       <span className="text-[10px] text-tertiary mb-1 tracking-wider">{t('人民币 (CNY)')}</span>
-                      <span className="text-brand font-mono text-2xl font-bold tracking-tight">¥{hide(formatMoney(displayEarned))}</span>
+                      <AutoFitText center maxPx={24} minPx={11} className="text-brand font-mono font-bold tracking-tight">¥{hide(formatMoneyFit(displayEarned))}</AutoFitText>
                    </div>
                    <div className="bg-card-inner rounded-xl p-3 border border-app flex flex-col items-center justify-center relative overflow-hidden">
-                      <span className="text-[10px] text-tertiary mb-1 tracking-wider">{t('美元 (USD)')}</span>
-                      <span className="text-primary font-mono text-2xl font-bold tracking-tight">${hide(formatMoney(displayEarned / config.exchangeRateUsd))}</span>
+                      <span className="text-[10px] text-tertiary mb-1 tracking-wider">{secondaryCurrency.code}</span>
+                      <AutoFitText center maxPx={24} minPx={11} className="text-primary font-mono font-bold tracking-tight">{secondaryCurrency.symbol}{hide(formatMoneyFit(displayEarned / secondaryCurrency.rate))}</AutoFitText>
                    </div>
                 </div>
 
@@ -2115,7 +2224,7 @@ export default function App() {
                  <p className="text-xs text-tertiary">{t('掌握进度，合理规划摸鱼与离职时刻。')}</p>
               </div>
               <div className="flex items-center gap-2">
-                 <button onClick={() => setShowUSD(!showUSD)} className={`text-[10px] px-2 py-1 rounded border transition-colors ${showUSD ? 'border-brand text-brand' : 'border-app-strong text-secondary hover:text-primary'}`}>USD</button>
+                 {renderCurrencySelect('text-[10px]')}
                  <button onClick={() => setShowMoney(!showMoney)} className="text-secondary hover:text-primary p-1 rounded-full bg-card-inner border border-app">
                     {showMoney ? <Eye size={16} /> : <EyeOff size={16} />}
                  </button>
@@ -2350,6 +2459,15 @@ export default function App() {
              
            </div>
            <p className="text-xs text-secondary mb-4">{t('精准的参数才能算出精准的摸鱼收益。')}</p>
+           {isDemoData && (
+             <div className="bg-orange-500/10 border border-orange-500/30 rounded-2xl p-4 mb-4 flex items-start gap-3">
+                <div className="text-xl leading-none">📝</div>
+                <div className="flex-1">
+                   <p className="text-xs font-bold text-orange-500 mb-1">{t('下面是示例数据，请改成你自己的')}</p>
+                   <p className="text-[11px] text-secondary leading-relaxed">{t('至少填写：月薪、上下班时间、发薪日、入职时间。填好后点击页面底部的「保存，开始计算」。')}</p>
+                </div>
+             </div>
+           )}
            
            <div className="bg-brand/5 border border-brand/20 rounded-2xl p-4 mb-4 flex items-center gap-3">
               <div className="w-10 h-10 rounded-full bg-brand/10 flex items-center justify-center text-brand shrink-0">
@@ -2431,12 +2549,13 @@ export default function App() {
                     />
                  </div>
                  <div>
-                    <label className="text-xs text-secondary mb-1.5 block">{t('汇率 (USD/CNY)')}</label>
-                    <input type="number" step="0.01"
-                      className="w-full appearance-none m-0 bg-card-inner border border-app-strong rounded-xl px-3 h-[44px] block box-border placeholder:text-secondary/50 text-primary font-mono text-base focus:border-brand focus:outline-none transition-colors"
-                      value={config.exchangeRateUsd === 0 ? '' : config.exchangeRateUsd}
-                      onChange={e => setConfig({...config, exchangeRateUsd: e.target.value === '' ? 0 : Number(e.target.value)})}
-                    />
+                    <label className="text-xs text-secondary mb-1.5 block">{t('显示币种 / 汇率')}</label>
+                    <button type="button" onClick={() => setShowCurrencyEditor(true)}
+                      className="w-full flex items-center justify-between bg-card-inner border border-app-strong rounded-xl px-3 h-[44px] text-primary font-mono text-base hover:border-brand transition-colors"
+                    >
+                      <span className="truncate">{activeCurrency.code} {activeCurrency.symbol}</span>
+                      <span className="text-[10px] text-secondary font-sans shrink-0">{t('编辑')} ›</span>
+                    </button>
                  </div>
               </div>
               <div>
@@ -2757,6 +2876,20 @@ export default function App() {
                  <span className="text-primary font-mono">¥ {minuteRate.toFixed(2)}</span>
               </div>
            </div>
+
+           {isDemoData && (
+             <div className="sticky bottom-24 md:bottom-4 z-20 max-w-4xl mx-auto mt-4">
+               <button
+                 onClick={() => {
+                   if (!config.monthlySalary || config.monthlySalary <= 0) { setToast({ message: t('请先填写每月税后薪资'), type: 'warn' }); return; }
+                   finishOnboarding();
+                   setActiveTab('home');
+                   setToast({ message: t('已保存，开始按你的数据计算 💰'), type: 'info' });
+                 }}
+                 className="w-full py-3.5 bg-brand text-app font-bold rounded-2xl shadow-[0_0_20px_rgba(0,255,65,0.35)] hover:bg-brand-hover transition-colors"
+               >{t('保存，开始计算')}</button>
+             </div>
+           )}
 
            <div className="mt-8 text-center opacity-50 flex flex-col gap-1 text-[11px] font-mono text-tertiary pb-8">
               <p>Architect & Author</p>
@@ -3149,6 +3282,77 @@ export default function App() {
             </div>
          )}
       </AnimatePresence>
+
+      {/* Onboarding (first open) */}
+      {showOnboarding && (
+        <div className="fixed inset-0 z-[70] bg-black/60 backdrop-blur-sm flex items-end md:items-center justify-center p-4" onClick={() => setShowOnboarding(false)}>
+          <div className="w-full max-w-sm bg-card border border-app rounded-3xl p-6 shadow-2xl" onClick={e => e.stopPropagation()}>
+            <div className="text-4xl mb-3">🐮⏱️</div>
+            <h3 className="text-lg font-bold text-primary mb-1">{t('欢迎来到 TimeMeter')}</h3>
+            <p className="text-xs text-secondary mb-4 leading-relaxed">{t('首页现在显示的是示例数据（月薪 25,000）。花 30 秒填写你的信息，就能看到自己每一秒赚了多少。')}</p>
+            <ol className="space-y-2 mb-5">
+              {[t('① 填写每月税后薪资'), t('② 设置上下班时间与午休'), t('③ 填写发薪日与入职时间')].map(step => (
+                <li key={step} className="text-xs text-primary bg-card-inner border border-app rounded-xl px-3 py-2">{step}</li>
+              ))}
+            </ol>
+            <button
+              onClick={() => { setShowOnboarding(false); setActiveTab('profile'); }}
+              className="w-full py-3 bg-brand text-app font-bold rounded-2xl hover:bg-brand-hover transition-colors mb-2"
+            >{t('去填写我的数据')}</button>
+            <button onClick={() => setShowOnboarding(false)} className="w-full py-2 text-xs text-tertiary hover:text-primary">{t('先看看示例')}</button>
+          </div>
+        </div>
+      )}
+
+      {/* Display currency & custom exchange rates */}
+      {showCurrencyEditor && (
+        <div className="fixed inset-0 z-[70] bg-black/60 backdrop-blur-sm flex items-end md:items-center justify-center p-4" onClick={() => setShowCurrencyEditor(false)}>
+          <div className="w-full max-w-md bg-card border border-app rounded-3xl p-5 shadow-2xl max-h-[85dvh] overflow-y-auto no-scrollbar" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-1">
+              <h3 className="text-base font-bold text-primary">{t('显示币种 / 汇率')}</h3>
+              <button onClick={() => setShowCurrencyEditor(false)} className="text-tertiary hover:text-primary p-1"><X size={18} /></button>
+            </div>
+            <p className="text-[11px] text-secondary mb-4">{t('薪资按人民币计算，选择币种后金额按「1 外币 = ? 人民币」换算显示。')}</p>
+            <div className="space-y-2">
+              <label className={`flex items-center gap-2 rounded-xl border px-3 py-2 cursor-pointer ${activeCurrency.code === 'CNY' ? 'border-brand bg-brand/5' : 'border-app bg-card-inner'}`}>
+                <input type="radio" name="displayCurrency" checked={activeCurrency.code === 'CNY'} onChange={() => setDisplayCurrency('CNY')} />
+                <span className="text-sm font-mono text-primary">CNY ¥</span>
+                <span className="text-[10px] text-tertiary ml-auto">{t('基准币种')}</span>
+              </label>
+              {currencyList.map((c, i) => {
+                const update = (patch: Partial<DisplayCurrency>) => setConfig((cfg: any) => {
+                  const list = [...(Array.isArray(cfg.currencies) ? cfg.currencies : DEFAULT_CURRENCIES)];
+                  const prevCode = list[i].code;
+                  list[i] = { ...list[i], ...patch };
+                  return { ...cfg, currencies: list, displayCurrency: cfg.displayCurrency === prevCode && patch.code !== undefined ? list[i].code : cfg.displayCurrency };
+                });
+                return (
+                  <div key={i} className={`flex items-center gap-1.5 rounded-xl border px-2 py-2 ${activeCurrency.code === c.code && c.code !== 'CNY' ? 'border-brand bg-brand/5' : 'border-app bg-card-inner'}`}>
+                    <input type="radio" name="displayCurrency" checked={activeCurrency.code === c.code && c.code !== 'CNY'} disabled={!(c.rate > 0) || !c.code} onChange={() => setDisplayCurrency(c.code)} className="shrink-0" />
+                    <input value={c.code} maxLength={5} placeholder={t('代码')} onChange={e => update({ code: e.target.value.toUpperCase().replace(/[^A-Z]/g, '') })} className="w-14 min-w-0 bg-card border border-app rounded-lg px-1.5 py-1 text-xs font-mono text-primary outline-none focus:border-brand" />
+                    <input value={c.symbol} maxLength={4} placeholder={t('符号')} onChange={e => update({ symbol: e.target.value })} className="w-11 min-w-0 bg-card border border-app rounded-lg px-1.5 py-1 text-xs font-mono text-primary outline-none focus:border-brand" />
+                    <span className="text-[10px] text-tertiary shrink-0">= ¥</span>
+                    <input type="number" step="any" min="0" value={c.rate === 0 ? '' : c.rate} placeholder="0.00" onChange={e => update({ rate: e.target.value === '' ? 0 : Math.max(0, Number(e.target.value)) })} className="flex-1 min-w-0 bg-card border border-app rounded-lg px-1.5 py-1 text-xs font-mono text-primary outline-none focus:border-brand" />
+                    <button
+                      onClick={() => setConfig((cfg: any) => {
+                        const list = (Array.isArray(cfg.currencies) ? cfg.currencies : DEFAULT_CURRENCIES).filter((_: any, j: number) => j !== i);
+                        return { ...cfg, currencies: list, displayCurrency: cfg.displayCurrency === c.code ? 'CNY' : cfg.displayCurrency };
+                      })}
+                      className="text-red-500/70 hover:text-red-500 p-1 shrink-0"
+                      aria-label={t('删除')}
+                    ><Trash2 size={14} /></button>
+                  </div>
+                );
+              })}
+            </div>
+            <button
+              onClick={() => setConfig((cfg: any) => ({ ...cfg, currencies: [...(Array.isArray(cfg.currencies) ? cfg.currencies : DEFAULT_CURRENCIES), { code: '', symbol: '', rate: 0 }] }))}
+              className="w-full mt-3 py-2 border border-dashed border-app-strong rounded-xl text-xs text-secondary hover:text-brand hover:border-brand transition-colors"
+            >{t('+ 添加自定义币种')}</button>
+            <button onClick={() => setShowCurrencyEditor(false)} className="w-full mt-3 py-3 bg-brand text-app font-bold rounded-2xl hover:bg-brand-hover transition-colors">{t('完成')}</button>
+          </div>
+        </div>
+      )}
 
         <div 
           className="fixed bottom-0 left-0 right-0 w-full md:max-w-4xl lg:max-w-6xl xl:max-w-[1400px] mx-auto bg-card-inner/90 backdrop-blur-lg border-t md:border border-app pt-2 px-2 sm:px-4 md:px-16 flex justify-evenly md:justify-between items-center z-50 md:rounded-b-3xl md:rounded-t-none md:bottom-4 xl:rounded-3xl shadow-2xl md:mb-4 xl:mb-0 transition-all duration-300"
