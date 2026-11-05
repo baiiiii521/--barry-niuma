@@ -110,8 +110,12 @@ npm run lint    # tsc --noEmit
 │   ├── index.css          Tailwind and design tokens
 │   └── lib/NoiseSynth.ts  Web Audio noise synthesis
 ├── scripts/translate/     String translation (Google / Gemini, dev only)
+├── scripts/verify/        Repro / accessibility / performance / i18n check scripts
+├── docs/OPTIMIZATION-GUIDE.md  Optimization & roadmap guide (task list, fixes, tricks; written in Chinese)
 └── metadata.json          AI Studio metadata
 ```
+
+> Contributing, human or agent: start with [`docs/OPTIMIZATION-GUIDE.md`](docs/OPTIMIZATION-GUIDE.md) (Chinese, with an English TL;DR at the top).
 
 ## Data and privacy
 

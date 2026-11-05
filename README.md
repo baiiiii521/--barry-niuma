@@ -108,8 +108,12 @@ npm run lint    # tsc --noEmit
 │   ├── index.css          Tailwind 与设计 token
 │   └── lib/NoiseSynth.ts  Web Audio 噪音合成
 ├── scripts/translate/     文案翻译（Google / Gemini，开发用）
+├── scripts/verify/        复现脚本：BUG 复现 / 无障碍扫描 / 性能探针 / 翻译覆盖
+├── docs/OPTIMIZATION-GUIDE.md  优化与演进指南（任务清单、修复方案、技巧库）
 └── metadata.json          AI Studio 元信息
 ```
+
+> 想改进这个项目（人或 Agent）：先读 [`docs/OPTIMIZATION-GUIDE.md`](docs/OPTIMIZATION-GUIDE.md)。
 
 ## 数据与隐私
 
